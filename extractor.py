@@ -21,12 +21,29 @@ one block per second. Structure (confirmed via binary inspection):
   52      4     altitude (float32 LE, metres — may be 0 on some firmware)
 """
 
+import math
 import struct
 from collections.abc import Generator
 from dataclasses import dataclass
 
 MAGIC = b"freeGPS "
 OFFSETS_TO_TRY = (32, 28, 30, 34, 36)
+
+# Max plausible distance between two consecutive 1-second GPS samples.
+# 500m ≈ 1800 km/h — generous enough for any car, catches teleportation.
+MAX_JUMP_M = 500
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in metres between two points."""
+    R = 6_371_000
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 @dataclass
@@ -86,12 +103,17 @@ def _parse_block(data: bytes, offset: int) -> GPSPoint | None:
 
 
 def extract_points(path: str) -> Generator[GPSPoint, None, None]:
-    """Scan MP4 file for freeGPS blocks and yield GPSPoint per second."""
+    """Scan MP4 file for freeGPS blocks and yield GPSPoint per second.
+
+    Includes a distance gate that drops points impossibly far from the
+    previous valid one (bad GPS fixes that jump to another continent).
+    """
     with open(path, "rb") as f:
         content = f.read()
 
     pos = 0
     block_index = 0
+    last_valid: GPSPoint | None = None
 
     while True:
         idx = content.find(MAGIC, pos)
@@ -113,6 +135,17 @@ def extract_points(path: str) -> Generator[GPSPoint, None, None]:
 
         if point is not None:
             point.video_sec = round(block_index * 1.0, 3)
+
+            # Distance gate: drop points that teleport
+            if last_valid is not None:
+                dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
+                if dist > MAX_JUMP_M:
+                    # Bad fix — skip this point, don't update last_valid
+                    block_index += 1
+                    pos = idx + 8
+                    continue
+
+            last_valid = point
             yield point
             block_index += 1
 
