@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,7 +21,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from db import Clip, get_engine
-from extractor import extract_points, points_to_gpx
+from scanner import apply_gps_metadata, extract_and_cache
 
 router = APIRouter()
 
@@ -353,58 +352,50 @@ async def stream_footage(clip_id: str, request: Request):
 
 _reindex_logger = logging.getLogger("dashtrack.reindex")
 _reindex_lock = threading.Lock()
-_reindex_state: dict = {"running": False, "total": 0, "done": 0, "errors": 0, "skipped": 0}
+_reindex_state: dict = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "errors": 0,
+    "skipped": 0,
+    "error_details": [],
+}
 
-GPX_CACHE_DIR = Path(os.getenv("GPX_DIR", "/dashtrack/gpx"))
 REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "4"))
 
 
-def _reindex_one(clip_id: str, mp4_path: str, gpx_path_str: str | None, filename: str) -> dict:
+def _reindex_one(cid: str, mp4_path: str, filename: str) -> dict:
     """Re-extract GPS from a single clip. Runs in a thread."""
     try:
         mp4 = Path(mp4_path)
         if not mp4.exists():
-            return {"id": clip_id, "status": "skip", "reason": "file_missing"}
+            return {"id": cid, "status": "skip", "reason": f"File not found: {mp4_path}"}
 
-        points = list(extract_points(str(mp4)))
+        points, gpx_path = extract_and_cache(mp4, cid, filename)
         if not points:
-            return {"id": clip_id, "status": "error", "reason": "no_gps"}
+            return {"id": cid, "status": "error", "reason": f"No GPS data in {filename}"}
 
-        gpx_str = points_to_gpx(points, source_name=filename)
-        gpx_out = GPX_CACHE_DIR / f"{clip_id}.gpx"
-        gpx_out.write_text(gpx_str, encoding="utf-8")
-
-        lats = [p.lat for p in points]
-        lons = [p.lon for p in points]
-        speeds = [p.speed_kmh for p in points if p.speed_kmh > 0]
-
-        return {
-            "id": clip_id,
-            "status": "ok",
-            "gpx_path": str(gpx_out),
-            "point_count": len(points),
-            "duration_sec": points[-1].video_sec,
-            "lat_min": min(lats),
-            "lat_max": max(lats),
-            "lon_min": min(lons),
-            "lon_max": max(lons),
-            "max_speed_kmh": round(max(speeds), 1) if speeds else None,
-        }
+        return {"id": cid, "status": "ok", "points": points, "gpx_path": gpx_path}
     except Exception as e:
-        return {"id": clip_id, "status": "error", "reason": str(e)}
+        return {"id": cid, "status": "error", "reason": f"{filename}: {type(e).__name__}: {e}"}
 
 
 async def _run_reindex():
     """Background task: re-extract all indexed clips in parallel."""
     global _reindex_state
 
-    GPX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
     with Session(get_engine()) as sess:
-        clips = sess.exec(select(Clip).where(Clip.status == "indexed")).all()
-        work = [(c.id, c.path, c.gpx_path, c.filename) for c in clips]
+        clips = sess.exec(select(Clip)).all()
+        work = [(c.id, c.path, c.filename) for c in clips]
 
-    _reindex_state = {"running": True, "total": len(work), "done": 0, "errors": 0, "skipped": 0}
+    _reindex_state = {
+        "running": True,
+        "total": len(work),
+        "done": 0,
+        "errors": 0,
+        "skipped": 0,
+        "error_details": [],
+    }
     _reindex_logger.info("Re-indexing %d clips with %d workers", len(work), REINDEX_WORKERS)
 
     loop = asyncio.get_event_loop()
@@ -420,60 +411,54 @@ async def _run_reindex():
             with Session(get_engine()) as sess:
                 clip = sess.get(Clip, cid)
                 if clip:
-                    clip.gpx_path = result["gpx_path"]
-                    clip.point_count = result["point_count"]
-                    clip.duration_sec = result["duration_sec"]
-                    clip.lat_min = result["lat_min"]
-                    clip.lat_max = result["lat_max"]
-                    clip.lon_min = result["lon_min"]
-                    clip.lon_max = result["lon_max"]
-                    clip.max_speed_kmh = result["max_speed_kmh"]
-                    clip.indexed_at = datetime.utcnow()
+                    apply_gps_metadata(clip, result["points"], result["gpx_path"])
                     sess.add(clip)
                     sess.commit()
             _reindex_state["done"] += 1
         elif result["status"] == "skip":
             _reindex_state["skipped"] += 1
             _reindex_state["done"] += 1
+            _reindex_logger.warning("Skipped %s: %s", cid, result["reason"])
+            _reindex_state["error_details"].append(result["reason"])
         else:
             _reindex_state["errors"] += 1
             _reindex_state["done"] += 1
-            _reindex_logger.warning("Re-index failed for %s: %s", cid, result.get("reason"))
+            _reindex_logger.warning("Re-index failed: %s", result["reason"])
+            _reindex_state["error_details"].append(result["reason"])
 
         if _reindex_state["done"] % 50 == 0:
             _reindex_logger.info(
-                "Re-index progress: %d/%d (errors: %d)",
+                "Re-index progress: %d/%d (errors: %d, skipped: %d)",
                 _reindex_state["done"],
                 _reindex_state["total"],
                 _reindex_state["errors"],
+                _reindex_state["skipped"],
             )
 
     executor.shutdown(wait=False)
     _reindex_state["running"] = False
     _reindex_logger.info(
-        "Re-index complete: %d done, %d errors, %d skipped",
+        "Re-index complete: %d ok, %d errors, %d skipped out of %d total",
         _reindex_state["done"] - _reindex_state["errors"] - _reindex_state["skipped"],
         _reindex_state["errors"],
         _reindex_state["skipped"],
+        _reindex_state["total"],
     )
 
 
 @router.post("/api/library/reindex")
 async def start_reindex():
-    """Re-extract GPS from all indexed clips using the latest extractor logic."""
+    """Re-extract GPS from all clips using the latest extractor logic."""
     with _reindex_lock:
         if _reindex_state.get("running"):
-            return {
-                "status": "already_running",
-                **_reindex_state,
-            }
+            return {"status": "already_running", **_reindex_state}
         asyncio.create_task(_run_reindex())
         return {"status": "started", "message": "Re-indexing all clips in background"}
 
 
 @router.get("/api/library/reindex")
 async def reindex_status():
-    """Check re-index progress."""
+    """Check re-index progress, including error details."""
     pct = (
         round(_reindex_state["done"] / _reindex_state["total"] * 100)
         if _reindex_state["total"] > 0

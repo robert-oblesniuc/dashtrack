@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from db import Clip, clip_id, get_engine
-from extractor import extract_points, points_to_gpx
+from extractor import GPSPoint, extract_points, points_to_gpx
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,46 @@ def parse_viofo_filename(filename: str) -> dict:
     return {"session_id": None, "recorded_at": None, "channel": "unknown"}
 
 
+def extract_and_cache(
+    mp4_path: Path, cid: str, filename: str
+) -> tuple[list[GPSPoint], Path | None]:
+    """Extract GPS from an MP4, write GPX cache file. Returns (points, gpx_path).
+
+    This is the shared core used by both initial indexing and re-indexing.
+    Runs synchronously — callers are responsible for threading.
+    """
+    GPX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    points = list(extract_points(str(mp4_path)))
+    if not points:
+        return [], None
+
+    gpx_str = points_to_gpx(points, source_name=filename)
+    gpx_path = GPX_CACHE_DIR / f"{cid}.gpx"
+    gpx_path.write_text(gpx_str, encoding="utf-8")
+    return points, gpx_path
+
+
+def apply_gps_metadata(clip: Clip, points: list[GPSPoint], gpx_path: Path) -> None:
+    """Populate a Clip's GPS metadata fields from extracted points."""
+    lats = [p.lat for p in points]
+    lons = [p.lon for p in points]
+    speeds = [p.speed_kmh for p in points if p.speed_kmh > 0]
+
+    clip.status = "indexed"
+    clip.gpx_path = str(gpx_path)
+    clip.point_count = len(points)
+    clip.duration_sec = points[-1].video_sec
+    clip.lat_min = min(lats)
+    clip.lat_max = max(lats)
+    clip.lon_min = min(lons)
+    clip.lon_max = max(lons)
+    clip.max_speed_kmh = round(max(speeds), 1) if speeds else None
+    clip.indexed_at = datetime.utcnow()
+
+
 async def index_file(path: Path) -> None:
     """Extract GPS from an MP4 file, write GPX cache, upsert Clip row."""
     cid = clip_id(str(path))
-    GPX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     with Session(get_engine()) as sess:
         existing = sess.get(Clip, cid)
@@ -66,30 +102,13 @@ async def index_file(path: Path) -> None:
 
     try:
         loop = asyncio.get_event_loop()
-        points = await loop.run_in_executor(None, lambda: list(extract_points(str(path))))
+        points, gpx_path = await loop.run_in_executor(None, extract_and_cache, path, cid, path.name)
 
         if not points:
             clip.status = "error"
             clip.error_msg = "No GPS data found"
         else:
-            gpx_str = points_to_gpx(points, source_name=path.name)
-            gpx_path = GPX_CACHE_DIR / f"{cid}.gpx"
-            gpx_path.write_text(gpx_str, encoding="utf-8")
-
-            lats = [p.lat for p in points]
-            lons = [p.lon for p in points]
-            speeds = [p.speed_kmh for p in points if p.speed_kmh > 0]
-
-            clip.status = "indexed"
-            clip.gpx_path = str(gpx_path)
-            clip.point_count = len(points)
-            clip.duration_sec = points[-1].video_sec
-            clip.lat_min = min(lats)
-            clip.lat_max = max(lats)
-            clip.lon_min = min(lons)
-            clip.lon_max = max(lons)
-            clip.max_speed_kmh = round(max(speeds), 1) if speeds else None
-            clip.indexed_at = datetime.utcnow()
+            apply_gps_metadata(clip, points, gpx_path)
 
     except Exception as e:
         logger.error("Failed to index %s: %s", path, e)
