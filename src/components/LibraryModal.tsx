@@ -339,8 +339,7 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
                             <div className="clip-meta">
                               <div className="clip-time mono">
                                 {item.primary.recorded_at
-                                  ? new Date(item.primary.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' +
-                                    new Date(item.primary.recorded_at).toLocaleTimeString([], { hour12: true }).slice(-2)
+                                  ? new Date(item.primary.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
                                   : '—'}
                               </div>
                               <div className="clip-badges">

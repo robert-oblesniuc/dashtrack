@@ -246,7 +246,7 @@ async def get_session_clips(session_id: str):
 @router.get("/api/library/{clip_id}/minitrack")
 async def get_minitrack(clip_id: str, points: int = 20):
     """Return a decimated lat/lon track for thumbnail rendering."""
-    import xml.etree.ElementTree as ET
+    import re as _re
 
     with Session(get_engine()) as sess:
         clip = sess.get(Clip, clip_id)
@@ -258,24 +258,15 @@ async def get_minitrack(clip_id: str, points: int = 20):
         if not p.exists():
             return []
 
-    tree = ET.parse(p)
-    ns = {"g": "http://www.topografix.com/GPX/1/1"}
-    trkpts = tree.findall(".//g:trkpt", ns)
-    if not trkpts:
-        # Try without namespace (our GPX files may not use one)
-        trkpts = tree.findall(".//{http://www.topografix.com/GPX/1/1}trkpt")
-    if not trkpts:
-        trkpts = tree.findall(".//trkpt")
-    if not trkpts:
+    # Fast regex extraction — avoids XML namespace headaches entirely
+    gpx_text = p.read_text(encoding="utf-8")
+    all_pts = [
+        [float(m.group(1)), float(m.group(2))]
+        for m in _re.finditer(r'<trkpt\s+lat="([^"]+)"\s+lon="([^"]+)"', gpx_text)
+    ]
+
+    if not all_pts:
         return []
-
-    all_pts = []
-    for tp in trkpts:
-        lat = tp.get("lat")
-        lon = tp.get("lon")
-        if lat and lon:
-            all_pts.append([float(lat), float(lon)])
-
     if len(all_pts) <= points:
         return all_pts
 

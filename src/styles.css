@@ -226,6 +226,12 @@ button{font-family:inherit;color:inherit;border:none;background:none;cursor:poin
 .clip-load{font-size:11px;color:var(--txt3);flex-shrink:0;opacity:0;transition:.13s;display:inline-flex;align-items:center;gap:2px}
 .clipcard:hover .clip-load{opacity:1;color:var(--accent)}
 
+/* mini route thumbnails */
+.miniroute{display:block;width:100%;height:100%}
+.miniroute-line{stroke:var(--accent);stroke-width:2.2;stroke-linejoin:round;stroke-linecap:round}
+.miniroute-rear rect{fill:none;stroke:rgba(255,255,255,.18);stroke-width:1.5;stroke-dasharray:4 3}
+.miniroute-rear text{fill:var(--txt3);font-size:11px;font-family:var(--font-mono);text-anchor:middle}
+
 /* calendar */
 .cal{background:var(--tile);border:1px solid var(--tile-brd);border-radius:12px;padding:10px}
 .cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
