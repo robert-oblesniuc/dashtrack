@@ -7,15 +7,22 @@ GET  /api/library/{clip_id}             single clip metadata + GPX
 GET  /api/footage/{clip_id}             stream video file (Range-request capable)
 """
 
+import asyncio
+import concurrent.futures
+import logging
+import os
 import re
+import threading
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from db import Clip, get_engine
+from extractor import extract_points, points_to_gpx
 
 router = APIRouter()
 
@@ -251,8 +258,6 @@ async def get_minitrack(clip_id: str, points: int = 20):
     """
     import re as _re
 
-    from fastapi.responses import JSONResponse
-
     with Session(get_engine()) as sess:
         clip = sess.get(Clip, clip_id)
         if not clip:
@@ -342,3 +347,136 @@ async def stream_footage(clip_id: str, request: Request):
         media_type="video/mp4",
         headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
     )
+
+
+# ── Re-index ─────────────────────────────────────────────────────────────────
+
+_reindex_logger = logging.getLogger("dashtrack.reindex")
+_reindex_lock = threading.Lock()
+_reindex_state: dict = {"running": False, "total": 0, "done": 0, "errors": 0, "skipped": 0}
+
+GPX_CACHE_DIR = Path(os.getenv("GPX_DIR", "/dashtrack/gpx"))
+REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "4"))
+
+
+def _reindex_one(clip_id: str, mp4_path: str, gpx_path_str: str | None, filename: str) -> dict:
+    """Re-extract GPS from a single clip. Runs in a thread."""
+    try:
+        mp4 = Path(mp4_path)
+        if not mp4.exists():
+            return {"id": clip_id, "status": "skip", "reason": "file_missing"}
+
+        points = list(extract_points(str(mp4)))
+        if not points:
+            return {"id": clip_id, "status": "error", "reason": "no_gps"}
+
+        gpx_str = points_to_gpx(points, source_name=filename)
+        gpx_out = GPX_CACHE_DIR / f"{clip_id}.gpx"
+        gpx_out.write_text(gpx_str, encoding="utf-8")
+
+        lats = [p.lat for p in points]
+        lons = [p.lon for p in points]
+        speeds = [p.speed_kmh for p in points if p.speed_kmh > 0]
+
+        return {
+            "id": clip_id,
+            "status": "ok",
+            "gpx_path": str(gpx_out),
+            "point_count": len(points),
+            "duration_sec": points[-1].video_sec,
+            "lat_min": min(lats),
+            "lat_max": max(lats),
+            "lon_min": min(lons),
+            "lon_max": max(lons),
+            "max_speed_kmh": round(max(speeds), 1) if speeds else None,
+        }
+    except Exception as e:
+        return {"id": clip_id, "status": "error", "reason": str(e)}
+
+
+async def _run_reindex():
+    """Background task: re-extract all indexed clips in parallel."""
+    global _reindex_state
+
+    GPX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    with Session(get_engine()) as sess:
+        clips = sess.exec(select(Clip).where(Clip.status == "indexed")).all()
+        work = [(c.id, c.path, c.gpx_path, c.filename) for c in clips]
+
+    _reindex_state = {"running": True, "total": len(work), "done": 0, "errors": 0, "skipped": 0}
+    _reindex_logger.info("Re-indexing %d clips with %d workers", len(work), REINDEX_WORKERS)
+
+    loop = asyncio.get_event_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=REINDEX_WORKERS)
+
+    futures = [loop.run_in_executor(executor, _reindex_one, *w) for w in work]
+
+    for fut in asyncio.as_completed(futures):
+        result = await fut
+        cid = result["id"]
+
+        if result["status"] == "ok":
+            with Session(get_engine()) as sess:
+                clip = sess.get(Clip, cid)
+                if clip:
+                    clip.gpx_path = result["gpx_path"]
+                    clip.point_count = result["point_count"]
+                    clip.duration_sec = result["duration_sec"]
+                    clip.lat_min = result["lat_min"]
+                    clip.lat_max = result["lat_max"]
+                    clip.lon_min = result["lon_min"]
+                    clip.lon_max = result["lon_max"]
+                    clip.max_speed_kmh = result["max_speed_kmh"]
+                    clip.indexed_at = datetime.utcnow()
+                    sess.add(clip)
+                    sess.commit()
+            _reindex_state["done"] += 1
+        elif result["status"] == "skip":
+            _reindex_state["skipped"] += 1
+            _reindex_state["done"] += 1
+        else:
+            _reindex_state["errors"] += 1
+            _reindex_state["done"] += 1
+            _reindex_logger.warning("Re-index failed for %s: %s", cid, result.get("reason"))
+
+        if _reindex_state["done"] % 50 == 0:
+            _reindex_logger.info(
+                "Re-index progress: %d/%d (errors: %d)",
+                _reindex_state["done"],
+                _reindex_state["total"],
+                _reindex_state["errors"],
+            )
+
+    executor.shutdown(wait=False)
+    _reindex_state["running"] = False
+    _reindex_logger.info(
+        "Re-index complete: %d done, %d errors, %d skipped",
+        _reindex_state["done"] - _reindex_state["errors"] - _reindex_state["skipped"],
+        _reindex_state["errors"],
+        _reindex_state["skipped"],
+    )
+
+
+@router.post("/api/library/reindex")
+async def start_reindex():
+    """Re-extract GPS from all indexed clips using the latest extractor logic."""
+    with _reindex_lock:
+        if _reindex_state.get("running"):
+            return {
+                "status": "already_running",
+                **_reindex_state,
+            }
+        asyncio.create_task(_run_reindex())
+        return {"status": "started", "message": "Re-indexing all clips in background"}
+
+
+@router.get("/api/library/reindex")
+async def reindex_status():
+    """Check re-index progress."""
+    pct = (
+        round(_reindex_state["done"] / _reindex_state["total"] * 100)
+        if _reindex_state["total"] > 0
+        else 0
+    )
+    return {**_reindex_state, "percent": pct}

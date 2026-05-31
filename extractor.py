@@ -102,59 +102,79 @@ def _parse_block(data: bytes, offset: int) -> GPSPoint | None:
         return None
 
 
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB read chunks — keeps memory low for multi-GB files
+
+
 def extract_points(path: str) -> Generator[GPSPoint, None, None]:
     """Scan MP4 file for freeGPS blocks and yield GPSPoint per second.
 
-    Includes a distance gate that drops points impossibly far from the
-    previous valid one (bad GPS fixes that jump to another continent).
+    Reads the file in 4 MB chunks (instead of loading it all into memory)
+    so multi-GB 4K files don't blow up RAM. Includes distance and stale-fix
+    gates to drop bad GPS coordinates.
     """
-    with open(path, "rb") as f:
-        content = f.read()
-
-    pos = 0
     block_index = 0
     last_valid: GPSPoint | None = None
+    carry = b""
 
-    while True:
-        idx = content.find(MAGIC, pos)
-        if idx < 0:
-            break
-
-        block_start = idx + len(MAGIC)
-        block = content[block_start : block_start + 128]
-
-        if len(block) < 40:
-            pos = idx + 8
-            continue
-
-        point = None
-        for try_offset in OFFSETS_TO_TRY:
-            point = _parse_block(block, try_offset)
-            if point is not None:
+    with open(path, "rb") as f:
+        while True:
+            raw = f.read(CHUNK_SIZE)
+            if not raw and not carry:
                 break
 
-        if point is not None:
-            point.video_sec = round(block_index * 1.0, 3)
+            buf = carry + raw
+            carry = b""
+            pos = 0
 
-            # Distance gate: drop points that teleport
-            if last_valid is not None:
-                dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
-                if dist > MAX_JUMP_M:
-                    # Big jump — definitely bad fix
-                    block_index += 1
+            while True:
+                idx = buf.find(MAGIC, pos)
+                if idx < 0:
+                    break
+
+                block_start = idx + len(MAGIC)
+                block_end = block_start + 128
+
+                # If the block extends past the buffer, carry it to next chunk
+                if block_end > len(buf):
+                    carry = buf[idx:]
+                    break
+
+                block = buf[block_start:block_end]
+
+                if len(block) < 40:
                     pos = idx + 8
                     continue
-                if point.speed_kmh == 0 and dist > 50:
-                    # Speed 0 but drifted >50m — stale/cached position from lost fix
+
+                point = None
+                for try_offset in OFFSETS_TO_TRY:
+                    point = _parse_block(block, try_offset)
+                    if point is not None:
+                        break
+
+                if point is not None:
+                    point.video_sec = round(block_index * 1.0, 3)
+
+                    # Distance gate: drop points that teleport
+                    if last_valid is not None:
+                        dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
+                        if dist > MAX_JUMP_M:
+                            block_index += 1
+                            pos = idx + 8
+                            continue
+                        if point.speed_kmh == 0 and dist > 50:
+                            block_index += 1
+                            pos = idx + 8
+                            continue
+
+                    last_valid = point
+                    yield point
                     block_index += 1
-                    pos = idx + 8
-                    continue
 
-            last_valid = point
-            yield point
-            block_index += 1
+                pos = idx + 8
 
-        pos = idx + 8
+            # Keep tail that might contain a partial MAGIC match
+            if not carry and len(buf) > len(MAGIC):
+                carry = buf[-(len(MAGIC) - 1) :]
 
 
 def points_to_gpx(points: list[GPSPoint], source_name: str = "dashcam") -> str:
