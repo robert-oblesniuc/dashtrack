@@ -249,106 +249,7 @@ async def get_session_clips(session_id: str):
         return [_to_detail(c, peer_map.get(c.id)) for c in clips]
 
 
-@router.get("/api/library/{clip_id}/minitrack")
-async def get_minitrack(clip_id: str, points: int = 20):
-    """Return a decimated lat/lon track for thumbnail rendering.
-
-    Response is immutable (GPS data never changes) so we cache aggressively.
-    """
-    import re as _re
-
-    with Session(get_engine()) as sess:
-        clip = sess.get(Clip, clip_id)
-        if not clip:
-            raise HTTPException(404, "Clip not found")
-        if not clip.gpx_path:
-            return []
-        p = Path(clip.gpx_path)
-        if not p.exists():
-            return []
-
-    # Fast regex extraction — avoids XML namespace headaches entirely
-    gpx_text = p.read_text(encoding="utf-8")
-    all_pts = [
-        [float(m.group(1)), float(m.group(2))]
-        for m in _re.finditer(r'<trkpt\s+lat="([^"]+)"\s+lon="([^"]+)"', gpx_text)
-    ]
-
-    if not all_pts:
-        return JSONResponse([], headers={"Cache-Control": "public, max-age=86400, immutable"})
-    if len(all_pts) <= points:
-        return JSONResponse(all_pts, headers={"Cache-Control": "public, max-age=86400, immutable"})
-
-    # Uniform decimation, always include first and last
-    step = (len(all_pts) - 1) / (points - 1)
-    result = [all_pts[round(i * step)] for i in range(points)]
-    result[-1] = all_pts[-1]
-    return JSONResponse(result, headers={"Cache-Control": "public, max-age=86400, immutable"})
-
-
-@router.get("/api/library/{clip_id}", response_model=ClipDetailResponse)
-async def get_clip(clip_id: str):
-    """Return a single clip's metadata and GPX."""
-    with Session(get_engine()) as sess:
-        clip = sess.get(Clip, clip_id)
-        if not clip:
-            raise HTTPException(404, "Clip not found")
-        peer_id = _peer_id(clip, sess)
-        return _to_detail(clip, peer_id)
-
-
-@router.get("/api/footage/{clip_id}")
-async def stream_footage(clip_id: str, request: Request):
-    """Stream MP4 video file with HTTP 206 Range request support for seeking."""
-    with Session(get_engine()) as sess:
-        clip = sess.get(Clip, clip_id)
-        if not clip:
-            raise HTTPException(404, "Clip not found")
-        path = Path(clip.path)
-        if not path.exists():
-            raise HTTPException(404, "Video file not found on disk")
-
-    file_size = path.stat().st_size
-    range_header = request.headers.get("range", "")
-
-    m = re.match(r"bytes=(\d+)-(\d*)", range_header)
-    if m:
-        start = int(m.group(1))
-        end = int(m.group(2)) if m.group(2) else file_size - 1
-        end = min(end, file_size - 1)
-        length = end - start + 1
-
-        def _iter():
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(65536, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-
-        return StreamingResponse(
-            _iter(),
-            status_code=206,
-            media_type="video/mp4",
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Content-Length": str(length),
-                "Accept-Ranges": "bytes",
-            },
-        )
-
-    # No Range header — send full file, but advertise range support
-    return FileResponse(
-        path,
-        media_type="video/mp4",
-        headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
-    )
-
-
-# ── Re-index ─────────────────────────────────────────────────────────────────
+# ── Re-index (must be above {clip_id} wildcard routes) ───────────────────────
 
 _reindex_logger = logging.getLogger("dashtrack.reindex")
 _reindex_lock = threading.Lock()
@@ -446,22 +347,185 @@ async def _run_reindex():
     )
 
 
+def _ansi_status() -> str:
+    """Format re-index status as ANSI-colored text for terminal output."""
+    s = _reindex_state
+    total = s["total"]
+    done = s["done"]
+    errors = s["errors"]
+    skipped = s["skipped"]
+    ok = done - errors - skipped
+    pct = round(done / total * 100) if total > 0 else 0
+
+    # ANSI colors
+    BOLD = "\033[1m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+    CYAN = "\033[36m"
+
+    if s.get("running"):
+        bar_w = 30
+        filled = round(pct / 100 * bar_w)
+        bar = f"{GREEN}{'█' * filled}{DIM}{'░' * (bar_w - filled)}{RESET}"
+        lines = [
+            f"{BOLD}DashTrack Re-index{RESET} {YELLOW}running{RESET}",
+            f"  {bar} {BOLD}{pct}%{RESET}  ({done}/{total})",
+            f"  {GREEN}✓ {ok} ok{RESET}  {RED}✗ {errors} errors{RESET}  {DIM}⊘ {skipped} skipped{RESET}",
+        ]
+    elif total == 0:
+        lines = [f"{BOLD}DashTrack Re-index{RESET} {DIM}idle — nothing indexed yet{RESET}"]
+    else:
+        status_color = GREEN if errors == 0 else YELLOW
+        lines = [
+            f"{BOLD}DashTrack Re-index{RESET} {status_color}complete{RESET}",
+            f"  {GREEN}✓ {ok} ok{RESET}  {RED}✗ {errors} errors{RESET}  {DIM}⊘ {skipped} skipped{RESET}  {CYAN}total: {total}{RESET}",
+        ]
+        if s.get("error_details"):
+            lines.append(f"\n  {RED}{BOLD}Errors:{RESET}")
+            for detail in s["error_details"][-20:]:  # Show last 20
+                lines.append(f"  {DIM}•{RESET} {detail}")
+            if len(s["error_details"]) > 20:
+                lines.append(f"  {DIM}… and {len(s['error_details']) - 20} more{RESET}")
+
+    return "\n".join(lines) + "\n"
+
+
 @router.post("/api/library/reindex")
-async def start_reindex():
+async def start_reindex(request: Request):
     """Re-extract GPS from all clips using the latest extractor logic."""
+    is_curl = "curl" in (request.headers.get("user-agent", "")).lower()
     with _reindex_lock:
         if _reindex_state.get("running"):
+            if is_curl:
+                return StreamingResponse(iter([_ansi_status()]), media_type="text/plain")
             return {"status": "already_running", **_reindex_state}
         asyncio.create_task(_run_reindex())
+        if is_curl:
+            return StreamingResponse(
+                iter(
+                    [
+                        "\033[1;32m✓\033[0m Re-index started in background\n  Check progress: \033[2mcurl http://localhost:8080/api/library/reindex\033[0m\n"
+                    ]
+                ),
+                media_type="text/plain",
+            )
         return {"status": "started", "message": "Re-indexing all clips in background"}
 
 
 @router.get("/api/library/reindex")
-async def reindex_status():
+async def reindex_status(request: Request):
     """Check re-index progress, including error details."""
+    is_curl = "curl" in (request.headers.get("user-agent", "")).lower()
+    if is_curl:
+        return StreamingResponse(iter([_ansi_status()]), media_type="text/plain")
     pct = (
         round(_reindex_state["done"] / _reindex_state["total"] * 100)
         if _reindex_state["total"] > 0
         else 0
     )
     return {**_reindex_state, "percent": pct}
+
+
+# ── Clip-level routes (wildcard {clip_id} — must be after /reindex) ──────────
+
+
+@router.get("/api/library/{clip_id}/minitrack")
+async def get_minitrack(clip_id: str, points: int = 20):
+    """Return a decimated lat/lon track for thumbnail rendering.
+
+    Response is immutable (GPS data never changes) so we cache aggressively.
+    """
+    import re as _re
+
+    with Session(get_engine()) as sess:
+        clip = sess.get(Clip, clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        if not clip.gpx_path:
+            return []
+        p = Path(clip.gpx_path)
+        if not p.exists():
+            return []
+
+    # Fast regex extraction — avoids XML namespace headaches entirely
+    gpx_text = p.read_text(encoding="utf-8")
+    all_pts = [
+        [float(m.group(1)), float(m.group(2))]
+        for m in _re.finditer(r'<trkpt\s+lat="([^"]+)"\s+lon="([^"]+)"', gpx_text)
+    ]
+
+    if not all_pts:
+        return JSONResponse([], headers={"Cache-Control": "public, max-age=86400, immutable"})
+    if len(all_pts) <= points:
+        return JSONResponse(all_pts, headers={"Cache-Control": "public, max-age=86400, immutable"})
+
+    # Uniform decimation, always include first and last
+    step = (len(all_pts) - 1) / (points - 1)
+    result = [all_pts[round(i * step)] for i in range(points)]
+    result[-1] = all_pts[-1]
+    return JSONResponse(result, headers={"Cache-Control": "public, max-age=86400, immutable"})
+
+
+@router.get("/api/library/{clip_id}", response_model=ClipDetailResponse)
+async def get_clip(clip_id: str):
+    """Return a single clip's metadata and GPX."""
+    with Session(get_engine()) as sess:
+        clip = sess.get(Clip, clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        peer_id = _peer_id(clip, sess)
+        return _to_detail(clip, peer_id)
+
+
+@router.get("/api/footage/{clip_id}")
+async def stream_footage(clip_id: str, request: Request):
+    """Stream MP4 video file with HTTP 206 Range request support for seeking."""
+    with Session(get_engine()) as sess:
+        clip = sess.get(Clip, clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        path = Path(clip.path)
+        if not path.exists():
+            raise HTTPException(404, "Video file not found on disk")
+
+    file_size = path.stat().st_size
+    range_header = request.headers.get("range", "")
+
+    m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+    if m:
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else file_size - 1
+        end = min(end, file_size - 1)
+        length = end - start + 1
+
+        def _iter():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            _iter(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(length),
+                "Accept-Ranges": "bytes",
+            },
+        )
+
+    # No Range header — send full file, but advertise range support
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+    )
