@@ -140,7 +140,12 @@ def extract_points(path: str) -> Generator[GPSPoint, None, None]:
             if last_valid is not None:
                 dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
                 if dist > MAX_JUMP_M:
-                    # Bad fix — skip this point, don't update last_valid
+                    # Big jump — definitely bad fix
+                    block_index += 1
+                    pos = idx + 8
+                    continue
+                if point.speed_kmh == 0 and dist > 50:
+                    # Speed 0 but drifted >50m — stale/cached position from lost fix
                     block_index += 1
                     pos = idx + 8
                     continue
