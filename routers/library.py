@@ -262,7 +262,7 @@ _reindex_state: dict = {
     "error_details": [],
 }
 
-REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "8"))
+REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "12"))
 
 
 def _reindex_one(cid: str, mp4_path: str, filename: str) -> dict:
@@ -300,7 +300,7 @@ async def _run_reindex():
     _reindex_logger.info("Re-indexing %d clips with %d workers", len(work), REINDEX_WORKERS)
 
     loop = asyncio.get_event_loop()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=REINDEX_WORKERS)
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=REINDEX_WORKERS)
 
     futures = [loop.run_in_executor(executor, _reindex_one, *w) for w in work]
 

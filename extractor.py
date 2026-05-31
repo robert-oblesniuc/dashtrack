@@ -22,7 +22,6 @@ one block per second. Structure (confirmed via binary inspection):
 """
 
 import math
-import mmap
 import struct
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -106,53 +105,54 @@ def _parse_block(data: bytes, offset: int) -> GPSPoint | None:
 def extract_points(path: str) -> Generator[GPSPoint, None, None]:
     """Scan MP4 file for freeGPS blocks and yield GPSPoint per second.
 
-    Uses mmap for fast scanning without loading the entire file into Python
-    memory. Includes distance and stale-fix gates to drop bad GPS coordinates.
+    Reads entire file into memory for fastest bytes.find() scanning.
+    Includes distance and stale-fix gates to drop bad GPS coordinates.
     """
+    with open(path, "rb") as f:
+        content = f.read()
+
+    pos = 0
     block_index = 0
     last_valid: GPSPoint | None = None
 
-    with open(path, "rb") as f:
-        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as content:
-            pos = 0
-            while True:
-                idx = content.find(MAGIC, pos)
-                if idx < 0:
-                    break
+    while True:
+        idx = content.find(MAGIC, pos)
+        if idx < 0:
+            break
 
-                block_start = idx + len(MAGIC)
-                block = content[block_start : block_start + 128]
+        block_start = idx + len(MAGIC)
+        block = content[block_start : block_start + 128]
 
-                if len(block) < 40:
+        if len(block) < 40:
+            pos = idx + 8
+            continue
+
+        point = None
+        for try_offset in OFFSETS_TO_TRY:
+            point = _parse_block(block, try_offset)
+            if point is not None:
+                break
+
+        if point is not None:
+            point.video_sec = round(block_index * 1.0, 3)
+
+            # Distance gate: drop points that teleport
+            if last_valid is not None:
+                dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
+                if dist > MAX_JUMP_M:
+                    block_index += 1
+                    pos = idx + 8
+                    continue
+                if point.speed_kmh == 0 and dist > 50:
+                    block_index += 1
                     pos = idx + 8
                     continue
 
-                point = None
-                for try_offset in OFFSETS_TO_TRY:
-                    point = _parse_block(block, try_offset)
-                    if point is not None:
-                        break
+            last_valid = point
+            yield point
+            block_index += 1
 
-                if point is not None:
-                    point.video_sec = round(block_index * 1.0, 3)
-
-                    # Distance gate: drop points that teleport
-                    if last_valid is not None:
-                        dist = _haversine_m(last_valid.lat, last_valid.lon, point.lat, point.lon)
-                        if dist > MAX_JUMP_M:
-                            block_index += 1
-                            pos = idx + 8
-                            continue
-                        if point.speed_kmh == 0 and dist > 50:
-                            block_index += 1
-                            pos = idx + 8
-                            continue
-
-                    last_valid = point
-                    yield point
-                    block_index += 1
-
-                pos = idx + 8
+        pos = idx + 8
 
 
 def points_to_gpx(points: list[GPSPoint], source_name: str = "dashcam") -> str:
