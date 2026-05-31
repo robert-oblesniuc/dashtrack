@@ -262,7 +262,7 @@ _reindex_state: dict = {
     "error_details": [],
 }
 
-REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "4"))
+REINDEX_WORKERS = int(os.getenv("REINDEX_WORKERS", "8"))
 
 
 def _reindex_one(cid: str, mp4_path: str, filename: str) -> dict:

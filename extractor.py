@@ -22,6 +22,7 @@ one block per second. Structure (confirmed via binary inspection):
 """
 
 import math
+import mmap
 import struct
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -102,44 +103,25 @@ def _parse_block(data: bytes, offset: int) -> GPSPoint | None:
         return None
 
 
-CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB read chunks — keeps memory low for multi-GB files
-
-
 def extract_points(path: str) -> Generator[GPSPoint, None, None]:
     """Scan MP4 file for freeGPS blocks and yield GPSPoint per second.
 
-    Reads the file in 4 MB chunks (instead of loading it all into memory)
-    so multi-GB 4K files don't blow up RAM. Includes distance and stale-fix
-    gates to drop bad GPS coordinates.
+    Uses mmap for fast scanning without loading the entire file into Python
+    memory. Includes distance and stale-fix gates to drop bad GPS coordinates.
     """
     block_index = 0
     last_valid: GPSPoint | None = None
-    carry = b""
 
     with open(path, "rb") as f:
-        while True:
-            raw = f.read(CHUNK_SIZE)
-            if not raw and not carry:
-                break
-
-            buf = carry + raw
-            carry = b""
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as content:
             pos = 0
-
             while True:
-                idx = buf.find(MAGIC, pos)
+                idx = content.find(MAGIC, pos)
                 if idx < 0:
                     break
 
                 block_start = idx + len(MAGIC)
-                block_end = block_start + 128
-
-                # If the block extends past the buffer, carry it to next chunk
-                if block_end > len(buf):
-                    carry = buf[idx:]
-                    break
-
-                block = buf[block_start:block_end]
+                block = content[block_start : block_start + 128]
 
                 if len(block) < 40:
                     pos = idx + 8
@@ -171,10 +153,6 @@ def extract_points(path: str) -> Generator[GPSPoint, None, None]:
                     block_index += 1
 
                 pos = idx + 8
-
-            # Keep tail that might contain a partial MAGIC match
-            if not carry and len(buf) > len(MAGIC):
-                carry = buf[-(len(MAGIC) - 1) :]
 
 
 def points_to_gpx(points: list[GPSPoint], source_name: str = "dashcam") -> str:
