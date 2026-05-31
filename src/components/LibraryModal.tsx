@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import type { SessionClip } from '../store'
-import { fetchLibrary, fetchDays, fetchClip, fetchClipBatch, fetchSession, LibraryClip, DayEntry, FOOTAGE_BASE } from '../api/library'
+import { fetchLibrary, fetchDays, fetchClip, fetchClipBatch, fetchSession, fetchMinitrack, LibraryClip, DayEntry, FOOTAGE_BASE } from '../api/library'
 import { parseGPX } from '../hooks/useGPX'
 import Icon from './Icon'
 
@@ -55,18 +55,31 @@ function Calendar({ month, setMonth, footage, selected, onSelect }: {
   )
 }
 
-// ── Mini route thumbnail ──────────────────────────────────────────────────────
-function MiniRoute({ points }: { points: { lat: number; lon: number }[] }) {
+// ── Mini route thumbnail (fetches real GPS track lazily) ──────────────────────
+const minitrackCache = new Map<string, [number, number][]>()
+
+function MiniRoute({ clipId }: { clipId: string }) {
+  const [pts, setPts] = useState<[number, number][] | null>(null)
+
+  useEffect(() => {
+    if (minitrackCache.has(clipId)) { setPts(minitrackCache.get(clipId)!); return }
+    let cancelled = false
+    fetchMinitrack(clipId, 24).then(data => {
+      if (!cancelled) { minitrackCache.set(clipId, data); setPts(data) }
+    })
+    return () => { cancelled = true }
+  }, [clipId])
+
   const path = useMemo(() => {
-    if (!points.length) return null
+    if (!pts || pts.length < 2) return null
     const w = 96, h = 60
     let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity
-    points.forEach(p => { minx = Math.min(minx, p.lon); miny = Math.min(miny, -p.lat); maxx = Math.max(maxx, p.lon); maxy = Math.max(maxy, -p.lat) })
+    pts.forEach(([lat, lon]) => { minx = Math.min(minx, lon); miny = Math.min(miny, -lat); maxx = Math.max(maxx, lon); maxy = Math.max(maxy, -lat) })
     const bw = (maxx - minx) || 1, bh = (maxy - miny) || 1
     const s = Math.min((w - 16) / bw, (h - 16) / bh)
     const ox = (w - bw * s) / 2 - minx * s, oy = (h - bh * s) / 2 - miny * s
-    return 'M' + points.map(p => `${(p.lon * s + ox).toFixed(1)},${(-p.lat * s + oy).toFixed(1)}`).join('L')
-  }, [points])
+    return 'M' + pts.map(([lat, lon]) => `${(lon * s + ox).toFixed(1)},${(-lat * s + oy).toFixed(1)}`).join('L')
+  }, [pts])
 
   return (
     <svg className="miniroute" viewBox="0 0 96 60" width={96} height={60}>
@@ -315,26 +328,13 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
                         const key = itemKey(item)
                         const isChecked = checked.has(key)
 
-                        // Build mini-route points from bbox
-                        const miniPts = item.primary.lat_min != null && item.primary.lon_min != null
-                          ? [
-                              { lat: item.primary.lat_min!, lon: item.primary.lon_min! },
-                              { lat: (item.primary.lat_min! + item.primary.lat_max!) / 2, lon: (item.primary.lon_min! + item.primary.lon_max!) / 2 },
-                              { lat: item.primary.lat_max!, lon: item.primary.lon_max! },
-                            ]
-                          : []
-
                         return (
                           <div key={key} className={`clipcard ${isChecked ? 'checked' : ''}`} onClick={() => loadBoth(item)}>
                             <label className="clip-check" onClick={e => e.stopPropagation()}>
                               <input type="checkbox" checked={isChecked} onChange={() => toggleCheck(item)} />
                             </label>
                             <div className="clip-thumb">
-                              {miniPts.length > 0 ? <MiniRoute points={miniPts} /> : (
-                                <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: 'var(--txt3)', fontFamily: 'var(--font-mono)', fontSize: 9 }}>
-                                  {item.primary.point_count ? `${item.primary.point_count} pts` : '—'}
-                                </div>
-                              )}
+                              <MiniRoute clipId={item.primary.id} />
                             </div>
                             <div className="clip-meta">
                               <div className="clip-time mono">

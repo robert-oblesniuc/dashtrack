@@ -243,6 +243,49 @@ async def get_session_clips(session_id: str):
         return [_to_detail(c, peer_map.get(c.id)) for c in clips]
 
 
+@router.get("/api/library/{clip_id}/minitrack")
+async def get_minitrack(clip_id: str, points: int = 20):
+    """Return a decimated lat/lon track for thumbnail rendering."""
+    import xml.etree.ElementTree as ET
+
+    with Session(get_engine()) as sess:
+        clip = sess.get(Clip, clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        if not clip.gpx_path:
+            return []
+        p = Path(clip.gpx_path)
+        if not p.exists():
+            return []
+
+    tree = ET.parse(p)
+    ns = {"g": "http://www.topografix.com/GPX/1/1"}
+    trkpts = tree.findall(".//g:trkpt", ns)
+    if not trkpts:
+        # Try without namespace (our GPX files may not use one)
+        trkpts = tree.findall(".//{http://www.topografix.com/GPX/1/1}trkpt")
+    if not trkpts:
+        trkpts = tree.findall(".//trkpt")
+    if not trkpts:
+        return []
+
+    all_pts = []
+    for tp in trkpts:
+        lat = tp.get("lat")
+        lon = tp.get("lon")
+        if lat and lon:
+            all_pts.append([float(lat), float(lon)])
+
+    if len(all_pts) <= points:
+        return all_pts
+
+    # Uniform decimation, always include first and last
+    step = (len(all_pts) - 1) / (points - 1)
+    result = [all_pts[round(i * step)] for i in range(points)]
+    result[-1] = all_pts[-1]
+    return result
+
+
 @router.get("/api/library/{clip_id}", response_model=ClipDetailResponse)
 async def get_clip(clip_id: str):
     """Return a single clip's metadata and GPX."""

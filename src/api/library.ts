@@ -80,3 +80,9 @@ export async function fetchSession(sessionId: string): Promise<LibraryClipDetail
   if (!res.ok) throw new Error(`Session fetch failed: ${res.status}`)
   return res.json()
 }
+
+export async function fetchMinitrack(clipId: string, points = 20): Promise<[number, number][]> {
+  const res = await fetch(`/api/library/${clipId}/minitrack?points=${points}`)
+  if (!res.ok) return []
+  return res.json()
+}
