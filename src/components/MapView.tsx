@@ -75,7 +75,7 @@ function buildVisualSegments(ms: MultiSegmentSession, totalPoints: number): Visu
 export default function MapView() {
   const {
     points, currentIdx, followCar, mapStyle, multiSession,
-    setFollowCar, setMapStyle, setCurrentIdx,
+    setCurrentIdx,
   } = useStore()
 
   const containerRef     = useRef<HTMLDivElement>(null)
@@ -328,68 +328,9 @@ export default function MapView() {
     })
   }, [mapStyle, clearRoute, addVisualSegments])
 
-  // Current visual segment color for HUD
-  const segmentColor = (() => {
-    if (!multiSession) return 'var(--acc)'
-    for (const vseg of visualSegsRef.current) {
-      if (currentIdx >= vseg.pointOffset && currentIdx < vseg.pointEnd) return vseg.color
-    }
-    return visualSegsRef.current[visualSegsRef.current.length - 1]?.color ?? 'var(--acc)'
-  })()
-
-  const p = points[currentIdx]
-
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-
-      {/* Coords HUD */}
-      {p && (
-        <div style={{ position: 'absolute', top: 10, left: 10, display: 'flex', flexDirection: 'column', gap: 6, pointerEvents: 'none', zIndex: 10 }}>
-          <HudPill>
-            <b style={{ color: 'var(--grn)' }}>{p.lat.toFixed(6)}</b>
-            &nbsp;&nbsp;
-            <b style={{ color: 'var(--grn)' }}>{p.lon.toFixed(6)}</b>
-          </HudPill>
-          {p.alt !== null && p.alt !== 0 && (
-            <HudPill>alt <b style={{ color: 'var(--grn)' }}>{Math.round(p.alt)}</b> m</HudPill>
-          )}
-        </div>
-      )}
-
-      {/* Map controls */}
-      <div style={{ position: 'absolute', top: 10, right: 10, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 10 }}>
-        <MapBtn active={followCar} onClick={() => setFollowCar(!followCar)}>
-          <Dot active={followCar} /> Follow car
-        </MapBtn>
-        <MapBtn onClick={() => setMapStyle(
-          mapStyle === 'standard-satellite' ? 'dark-v11'
-          : mapStyle === 'dark-v11' ? 'light-v11'
-          : 'standard-satellite'
-        )}>
-          <Dot color="var(--acc2)" /> {
-            mapStyle === 'standard-satellite' ? 'Satellite'
-            : mapStyle === 'dark-v11' ? 'Dark'
-            : 'Light'
-          }
-        </MapBtn>
-      </div>
-
-      {/* Speed HUD */}
-      {p && p.speed > 0 && (
-        <div style={{ position: 'absolute', bottom: 12, left: 12, background: 'rgba(9,9,12,0.9)', border: `1px solid ${segmentColor}55`, borderRadius: 10, padding: '8px 16px', zIndex: 10, pointerEvents: 'none' }}>
-          <div>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 500, color: segmentColor, lineHeight: 1 }}>{Math.round(p.speed)}</span>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--txt2)', marginLeft: 3 }}>km/h</span>
-          </div>
-          {p.bearing !== 0 && (
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--txt3)', marginTop: 2 }}>
-              {bearingLabel(p.bearing)} · {Math.round(p.bearing)}°
-            </div>
-          )}
-        </div>
-      )}
-
       <style>{`.mapboxgl-ctrl-logo,.mapboxgl-ctrl-attrib{display:none!important}`}</style>
     </div>
   )
@@ -412,33 +353,4 @@ function fitBounds(m: mapboxgl.Map, pts: GPSPoint[]) {
     else if (p.lat > maxLat) maxLat = p.lat
   }
   m.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 50 })
-}
-
-function bearingLabel(b: number) {
-  return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(b / 45) % 8]
-}
-
-function HudPill({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ background: 'rgba(9,9,12,0.85)', border: '1px solid var(--b2)', borderRadius: 20, padding: '4px 12px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--txt2)', backdropFilter: 'blur(6px)' }}>
-      {children}
-    </div>
-  )
-}
-
-function MapBtn({ children, onClick, active }: { children: React.ReactNode; onClick: () => void; active?: boolean }) {
-  return (
-    <div onClick={onClick} style={{
-      background: 'rgba(9,9,12,0.88)', border: '1px solid var(--b2)',
-      borderRadius: 8, padding: '7px 12px', fontFamily: 'var(--mono)', fontSize: 11,
-      color: active ? 'var(--grn)' : 'var(--acc)', cursor: 'pointer',
-      display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap',
-    }}>
-      {children}
-    </div>
-  )
-}
-
-function Dot({ active, color }: { active?: boolean; color?: string }) {
-  return <div style={{ width: 7, height: 7, borderRadius: '50%', background: color ?? (active ? 'var(--grn)' : 'var(--acc)'), flexShrink: 0 }} />
 }

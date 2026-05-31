@@ -1,26 +1,38 @@
 import { useLayoutEffect, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { MdAdd, MdSwapHoriz, MdRefresh, MdMap, MdOndemandVideo, MdFormatListBulleted } from 'react-icons/md'
 import MapView from './components/MapView'
 import MultiVideoPlayer from './components/MultiVideoPlayer'
-import Timeline from './components/Timeline'
-import UploadZone from './components/UploadZone'
+import Hud from './components/Hud'
+import StatsTile from './components/StatsTile'
+import SpeedGraph from './components/SpeedGraph'
+import WaypointList from './components/WaypointList'
+import PlayerBar from './components/PlayerBar'
+import FirstScreen from './components/FirstScreen'
 import LibraryModal from './components/LibraryModal'
+import Icon from './components/Icon'
 import { useStore } from './store'
+import type { MapStyle } from './store'
 import { useViewportWidth } from './hooks/useViewportWidth'
 
-type MobileTab = 'map' | 'video' | 'timeline'
+type StageMode = 'map' | 'video'
 
 export default function App() {
-  const { swapped, setSwapped, multiSession, points, reset } = useStore()
+  const {
+    swapped, setSwapped, multiSession, points, reset,
+    followCar, setFollowCar, mapStyle, setMapStyle,
+  } = useStore()
+
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [libraryInitialTab, setLibraryInitialTab] = useState<'library' | 'upload'>('library')
   const [libraryChecked, setLibraryChecked] = useState<Set<string>>(new Set())
-  const [mobileTab, setMobileTab] = useState<MobileTab>('map')
+  const [dockOpen, setDockOpen] = useState(true)
+  const [showWp, setShowWp] = useState(false)
+  const [stage, setStage] = useState<StageMode>('map')
+  const [focusVid, setFocusVid] = useState(false)
+  const [focusMap, setFocusMap] = useState(false)
 
-  const vw       = useViewportWidth()
-  const isMobile = vw < 640
-  const isTablet = vw < 900
+  const vw = useViewportWidth()
+  const isMobile = vw < 760
 
   const openModal = (tab: 'library' | 'upload') => {
     setLibraryInitialTab(tab)
@@ -38,42 +50,75 @@ export default function App() {
   }
   if (!videoBox.current) {
     videoBox.current = document.createElement('div')
-    videoBox.current.style.cssText = 'width:100%;display:flex;flex-direction:column'
+    videoBox.current.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
   }
 
-  const leftSlotRef  = useRef<HTMLDivElement>(null)
-  const smallSlotRef = useRef<HTMLDivElement>(null)
+  const stageRef    = useRef<HTMLDivElement>(null)
+  const dockVidRef  = useRef<HTMLDivElement>(null)
+  const dockMapRef  = useRef<HTMLDivElement>(null)
+  const focusVidRef = useRef<HTMLDivElement>(null)
+  const focusMapRef = useRef<HTMLDivElement>(null)
+  const cinemaPipRef = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
     const mapEl   = mapBox.current!
     const videoEl = videoBox.current!
-    const left    = leftSlotRef.current!
-    const small   = smallSlotRef.current   // null on mobile (sidebar not rendered)
 
-    if (isMobile) {
-      const showVideo = mobileTab === 'video'
-      // Keep both in the left slot, toggle visibility
-      mapEl.style.cssText   = `flex:1 1 0;min-height:0;position:relative;overflow:hidden;${showVideo ? 'display:none' : ''}`
-      videoEl.style.cssText = `flex:1 1 0;min-height:0;display:${showVideo ? 'flex' : 'none'};flex-direction:column`
-      if (mapEl.parentElement   !== left) left.appendChild(mapEl)
-      if (videoEl.parentElement !== left) left.appendChild(videoEl)
-    } else if (swapped) {
-      videoEl.style.cssText = 'flex:1 1 0;min-height:0;width:100%;display:flex;flex-direction:column'
-      left.appendChild(videoEl)
-      mapEl.style.cssText = 'width:100%;height:225px;position:relative;overflow:hidden'
-      small?.appendChild(mapEl)
-    } else {
+    // Reset styles for placement
+    mapEl.style.cssText   = 'width:100%;height:100%;position:relative;overflow:hidden'
+    videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+
+    // Focus overlays take priority
+    if (focusVid && focusVidRef.current) {
+      videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+      focusVidRef.current.appendChild(videoEl)
+      if (stageRef.current) {
+        mapEl.style.cssText = 'width:100%;height:100%;position:relative;overflow:hidden'
+        stageRef.current.appendChild(mapEl)
+      }
+      return () => { mapEl.parentElement?.removeChild(mapEl); videoEl.parentElement?.removeChild(videoEl) }
+    }
+    if (focusMap && focusMapRef.current) {
       mapEl.style.cssText = 'width:100%;height:100%;position:relative;overflow:hidden'
-      left.appendChild(mapEl)
-      videoEl.style.cssText = 'width:100%;display:flex;flex-direction:column'
-      small?.appendChild(videoEl)
+      focusMapRef.current.appendChild(mapEl)
+      if (stageRef.current) {
+        videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+        stageRef.current.appendChild(videoEl)
+      }
+      return () => { mapEl.parentElement?.removeChild(mapEl); videoEl.parentElement?.removeChild(videoEl) }
+    }
+
+    if (stage === 'map') {
+      // Map fills stage, video goes in dock or cinema PiP
+      mapEl.style.cssText = 'width:100%;height:100%;position:relative;overflow:hidden'
+      stageRef.current?.appendChild(mapEl)
+
+      if (dockOpen && dockVidRef.current) {
+        videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+        dockVidRef.current.appendChild(videoEl)
+      } else if (cinemaPipRef.current) {
+        videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+        cinemaPipRef.current.appendChild(videoEl)
+      }
+    } else {
+      // Video fills stage, map goes in dock or cinema PiP
+      videoEl.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column'
+      stageRef.current?.appendChild(videoEl)
+
+      if (dockOpen && dockMapRef.current) {
+        mapEl.style.cssText = 'width:100%;height:100%;position:relative;overflow:hidden'
+        dockMapRef.current.appendChild(mapEl)
+      } else if (cinemaPipRef.current) {
+        mapEl.style.cssText = 'width:100%;height:100%;position:relative;overflow:hidden'
+        cinemaPipRef.current.appendChild(mapEl)
+      }
     }
 
     return () => {
       mapEl.parentElement?.removeChild(mapEl)
       videoEl.parentElement?.removeChild(videoEl)
     }
-  }, [swapped, isMobile, mobileTab])
+  }, [stage, dockOpen, focusVid, focusMap])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -85,158 +130,141 @@ export default function App() {
       if (e.code === 'ArrowRight') { e.preventDefault(); if (vid) vid.currentTime += e.shiftKey ? 30 : 10 }
       if (e.code === 'ArrowLeft')  { e.preventDefault(); if (vid) vid.currentTime -= e.shiftKey ? 30 : 10 }
       if (e.code === 'KeyM') { if (vid) vid.muted = !vid.muted }
+      if (e.code === 'KeyC') setDockOpen(d => !d)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  const sidebarWidth = isTablet ? 320 : 400
+  const mapStyleLabel = mapStyle === 'standard-satellite' ? 'Sat' : mapStyle === 'dark-v11' ? 'Dark' : 'Light'
+  const mapStyles: [MapStyle, string][] = [['standard-satellite', 'Sat'], ['dark-v11', 'Dark'], ['light-v11', 'Light']]
 
   return (
     <>
-      <div style={{
-        display: 'grid',
-        gridTemplateRows: isMobile && !welcomeMode ? '48px 1fr 56px' : '48px 1fr',
-        gridTemplateColumns: isMobile ? '1fr' : `1fr ${sidebarWidth}px`,
-        height: '100dvh',
-        background: 'var(--bg)',
-      }}>
+      <div className="app">
+        <div className="stage" ref={stageRef}>
+          {/* Top floating bar */}
+          <div className="topbar">
+            <div className="brand">
+              <Icon name="navigation" size={15} className="brand-mark" />
+              Dash<b>Track</b>
+            </div>
 
-        {/* HEADER */}
-        <div style={{
-          gridColumn: '1/-1',
-          display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 12,
-          padding: `0 ${isMobile ? 10 : 16}px`,
-          background: 'var(--s1)', borderBottom: '1px solid var(--b2)', zIndex: 100,
-          overflow: 'hidden',
-        }}>
-          <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '.1em', color: 'var(--acc)', textTransform: 'uppercase', flexShrink: 0 }}>
-            DashTrack
-          </span>
-          {!isMobile && <div style={{ width: 1, height: 18, background: 'var(--b3)', flexShrink: 0 }} />}
-          {!isMobile && <HeaderMeta />}
-          <div style={{ flex: 1 }} />
-          {multiSession && (
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--grn)', background: 'rgba(0,229,160,.08)', border: '1px solid rgba(0,229,160,.2)', borderRadius: 5, padding: '3px 8px', whiteSpace: 'nowrap', flexShrink: 0 }}>
-              {multiSession.clips.length}{isMobile ? '' : ' segments'}
+            {!isMobile && !welcomeMode && (
+              <div className="topbar-route mono">
+                {multiSession
+                  ? `${multiSession.clips.length} segments`
+                  : points.length > 0
+                    ? `${points.length} pts`
+                    : ''}
+              </div>
+            )}
+
+            <div className="topbar-spacer" />
+
+            {!welcomeMode && (
+              <>
+                {!isMobile && (
+                  <div className="seg">
+                    {mapStyles.map(([k, l]) => (
+                      <button key={k} className={mapStyle === k ? 'on' : ''} onClick={() => setMapStyle(k)}>{l}</button>
+                    ))}
+                  </div>
+                )}
+                <button className="pill" onClick={() => setStage(s => s === 'map' ? 'video' : 'map')} title="Swap map / video">
+                  <Icon name="swap" size={14} />{!isMobile && 'Swap'}
+                </button>
+                <button className={`pill ${dockOpen ? 'on' : ''}`} onClick={() => setDockOpen(d => !d)} title="Dashboard / Cinema">
+                  <Icon name="layout" size={14} />{!isMobile && (dockOpen ? 'Cinema' : 'Dashboard')}
+                </button>
+                <button className={`pill ${followCar ? 'on' : ''}`} onClick={() => setFollowCar(!followCar)} title="Follow car / Overview">
+                  <Icon name={followCar ? 'crosshair' : 'map'} size={14} />{!isMobile && (followCar ? 'Follow' : 'Overview')}
+                </button>
+                <button className="pill" onClick={() => openModal('library')} title="Library">
+                  <Icon name="film" size={15} />{!isMobile && 'Library'}
+                </button>
+                <button className="pill pill--accent" onClick={() => openModal('upload')} title="Add video">
+                  <Icon name="plus" size={15} />{!isMobile && 'Add'}
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* HUD — speed + compass */}
+          {!welcomeMode && <Hud />}
+
+          {/* BENTO DOCK */}
+          {!welcomeMode && dockOpen && (
+            <div className="dock">
+              {stage === 'map' ? (
+                <div className="tile vtilewrap">
+                  <div className="vtile" ref={dockVidRef}>
+                    {/* video moves here via DOM */}
+                  </div>
+                  <button className="vbtn" onClick={() => setFocusVid(true)} title="Expand" style={{ position: 'absolute', top: 8, right: 8, zIndex: 5 }}>
+                    <Icon name="fullscreen" size={14} />
+                  </button>
+                </div>
+              ) : (
+                <div className="tile maptilewrap" ref={dockMapRef}>
+                  {/* map moves here via DOM */}
+                  <button className="vbtn map-expand" onClick={() => setFocusMap(true)} title="Expand map">
+                    <Icon name="fullscreen" size={14} />
+                  </button>
+                </div>
+              )}
+              <StatsTile />
+              <SpeedGraph />
+              <div className="dock-tabs">
+                <button className={showWp ? '' : 'on'} onClick={() => setShowWp(false)}>Graph view</button>
+                <button className={showWp ? 'on' : ''} onClick={() => setShowWp(true)}>Waypoints</button>
+              </div>
+              {showWp && <WaypointList />}
             </div>
           )}
-          {!welcomeMode && (
-            <>
-              <HeaderBtn onClick={() => openModal('library')} active={libraryOpen && libraryInitialTab === 'library'}>
-                {isMobile ? '☰' : 'Library'}
-              </HeaderBtn>
-              <HeaderBtn onClick={() => openModal('upload')} active={libraryOpen && libraryInitialTab === 'upload'}>
-                <MdAdd size={15} />{!isMobile && 'Add video'}
-              </HeaderBtn>
-              {!isMobile && (
-                <HeaderBtn onClick={() => setSwapped(!swapped)} active={swapped}>
-                  <MdSwapHoriz size={16} />{swapped ? 'Unswap' : 'Swap'}
-                </HeaderBtn>
-              )}
-              <HeaderBtn onClick={() => { reset(); setLibraryChecked(new Set()) }}>
-                <MdRefresh size={15} />{!isMobile && 'Reset'}
-              </HeaderBtn>
-            </>
+
+          {/* Cinema PiP — shows when dock is closed */}
+          {!welcomeMode && !dockOpen && (
+            <div className="cinema-pip" ref={cinemaPipRef}>
+              {/* the non-stage element moves here via DOM */}
+            </div>
           )}
+
+          {/* Floating player bar */}
+          {!welcomeMode && <PlayerBar />}
         </div>
-
-        {/* LEFT: big slot (map + video, one visible at a time on mobile) */}
-        <div
-          ref={leftSlotRef}
-          style={{ gridColumn: 1, gridRow: 2, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}
-        />
-
-        {/* RIGHT SIDEBAR — tablet/desktop only */}
-        {!isMobile && (
-          <div style={{ gridColumn: 2, gridRow: 2, background: 'var(--s1)', borderLeft: '1px solid var(--b2)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <div ref={smallSlotRef} style={{ flexShrink: 0, overflow: 'hidden', position: 'relative' }} />
-            <Timeline />
-          </div>
-        )}
-
-        {/* BOTTOM TAB BAR — mobile only, not in welcome mode */}
-        {isMobile && !welcomeMode && (
-          <div style={{
-            gridColumn: '1/-1', gridRow: 3,
-            display: 'flex', background: 'var(--s1)', borderTop: '1px solid var(--b2)',
-            paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-          }}>
-            {([
-              { tab: 'map'      as MobileTab, icon: <MdMap size={22} />,              label: 'Map'   },
-              { tab: 'video'    as MobileTab, icon: <MdOndemandVideo size={22} />,     label: 'Video' },
-              { tab: 'timeline' as MobileTab, icon: <MdFormatListBulleted size={22} />, label: 'Stats' },
-            ]).map(({ tab, icon, label }) => (
-              <button
-                key={tab}
-                onClick={() => setMobileTab(tab)}
-                style={{
-                  flex: 1,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                  gap: 2,
-                  background: 'transparent', border: 'none',
-                  borderTop: `2px solid ${mobileTab === tab ? 'var(--acc)' : 'transparent'}`,
-                  color: mobileTab === tab ? 'var(--acc)' : 'var(--txt3)',
-                  cursor: 'pointer', transition: 'color .15s, border-color .15s',
-                  fontFamily: 'var(--mono)', fontSize: 10,
-                  paddingTop: 6,
-                }}
-              >
-                {icon}
-                {label}
-              </button>
-            ))}
-          </div>
-        )}
-
       </div>
 
-      {/* MOBILE: Timeline overlay when Stats tab is active */}
-      {isMobile && !welcomeMode && mobileTab === 'timeline' && (
-        <div style={{
-          position: 'fixed', top: 48, bottom: 56, left: 0, right: 0,
-          zIndex: 20, background: 'var(--s1)',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}>
-          <Timeline />
+      {/* Video focus overlay */}
+      {focusVid && (
+        <div className="modal-scrim" onClick={() => setFocusVid(false)}>
+          <div className="vid-focus" onClick={e => e.stopPropagation()}>
+            <div ref={focusVidRef} style={{ width: '100%', height: '100%' }} />
+            <button className="iconbtn vid-focus-x" onClick={() => setFocusVid(false)}>
+              <Icon name="x" size={15} />
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Welcome overlay — shown until GPS data is loaded */}
-      {welcomeMode && (
-        <div style={{
-          position: 'fixed', inset: 0, top: 48,
-          zIndex: 50,
-          background: 'var(--bg)',
-          display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center',
-          gap: 28,
-          padding: '0 16px',
-        }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 700, letterSpacing: '.12em', color: 'var(--acc)', fontFamily: 'var(--ui)', textTransform: 'uppercase', marginBottom: 8 }}>
-              DashTrack
-            </div>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--txt3)', letterSpacing: '.04em' }}>
-              GPS route visualization for Viofo dashcams
-            </div>
-          </div>
-
-          <div style={{ width: 'min(480px, 100%)' }}>
-            <UploadZone />
-          </div>
-
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--txt3)', textAlign: 'center', lineHeight: 1.8 }}>
-            or open{' '}
-            <span
-              onClick={() => openModal('library')}
-              style={{ color: 'var(--acc)', cursor: 'pointer', textDecoration: 'underline', textDecorationColor: 'rgba(245,197,66,.4)' }}
-            >
-              Library
-            </span>
-            {' '}to browse indexed footage
+      {/* Map focus overlay */}
+      {focusMap && (
+        <div className="modal-scrim" onClick={() => setFocusMap(false)}>
+          <div className="vid-focus" onClick={e => e.stopPropagation()}>
+            <div ref={focusMapRef} className="focus-map" />
+            <button className="iconbtn vid-focus-x" onClick={() => setFocusMap(false)}>
+              <Icon name="x" size={15} />
+            </button>
           </div>
         </div>
+      )}
+
+      {/* First screen / welcome */}
+      {welcomeMode && (
+        <FirstScreen
+          onOpenLibrary={() => openModal('library')}
+          onOpenUpload={() => openModal('upload')}
+        />
       )}
 
       {/* Portals: always live in their stable containers, never remount */}
@@ -253,36 +281,5 @@ export default function App() {
         />
       )}
     </>
-  )
-}
-
-function HeaderMeta() {
-  const { points, currentIdx, extractionStatus } = useStore()
-  const p = points[currentIdx]
-  if (extractionStatus === 'uploading')  return <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--txt2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>uploading…</span>
-  if (extractionStatus === 'extracting') return <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--acc)', whiteSpace: 'nowrap' }}>extracting GPS…</span>
-  if (!p) return <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--txt3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>drop a video or open library</span>
-  return (
-    <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--txt2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-      {p.time ? <b style={{ color: 'var(--txt)' }}>{p.time.toLocaleTimeString()}&nbsp;</b> : null}
-      {p.lat.toFixed(4)}, {p.lon.toFixed(4)}
-    </span>
-  )
-}
-
-function HeaderBtn({ children, onClick, active }: { children: React.ReactNode; onClick: () => void; active?: boolean }) {
-  return (
-    <div onClick={onClick} style={{
-      background: active ? 'var(--acc-dim)' : 'var(--s2)',
-      border: `1px solid ${active ? 'rgba(245,197,66,.4)' : 'var(--b2)'}`,
-      borderRadius: 6, padding: '5px 10px', cursor: 'pointer',
-      fontFamily: 'var(--mono)', fontSize: 11,
-      color: active ? 'var(--acc)' : 'var(--txt2)',
-      transition: 'all .15s', userSelect: 'none',
-      display: 'flex', alignItems: 'center', gap: 5,
-      flexShrink: 0,
-    }}>
-      {children}
-    </div>
   )
 }
