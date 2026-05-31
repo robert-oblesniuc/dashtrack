@@ -71,6 +71,12 @@ async def health():
     return {"status": "ok"}
 
 
+# ── CLIENT CONFIG (runtime secrets) ──────────────────────────
+@app.get("/api/config")
+async def config():
+    return {"mapboxToken": os.getenv("VITE_MAPBOX_TOKEN", "")}
+
+
 # ── START EXTRACTION JOB ──────────────────────────────────────
 @app.post("/api/extract/start")
 async def extract_start(file: UploadFile = File(...)):

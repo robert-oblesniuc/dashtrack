@@ -9,9 +9,6 @@ RUN npm install
 COPY vite.config.ts tsconfig.json index.html ./
 COPY src ./src
 
-ARG VITE_MAPBOX_TOKEN
-ENV VITE_MAPBOX_TOKEN=$VITE_MAPBOX_TOKEN
-
 RUN npm run build
 # Output: /app/frontend/dist
 

@@ -5,7 +5,24 @@ import { useStore, GPSPoint } from '../store'
 import { haversine } from '../hooks/useGPX'
 import type { MultiSegmentSession } from '../store'
 
-mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN ?? ''
+// Token set at runtime via /api/config — see initToken() below
+let tokenReady: Promise<void> | null = null
+
+function initToken() {
+  if (tokenReady) return tokenReady
+  // Use build-time env var if available (dev mode), otherwise fetch from backend
+  const buildToken = import.meta.env.VITE_MAPBOX_TOKEN
+  if (buildToken) {
+    mapboxgl.accessToken = buildToken
+    tokenReady = Promise.resolve()
+  } else {
+    tokenReady = fetch('/api/config')
+      .then(r => r.json())
+      .then(cfg => { mapboxgl.accessToken = cfg.mapboxToken || '' })
+      .catch(() => { mapboxgl.accessToken = '' })
+  }
+  return tokenReady
+}
 
 const GAP_THRESHOLD_M = 500
 const GAP_THRESHOLD_S = 120
@@ -87,21 +104,26 @@ export default function MapView() {
   const styleFirstRun    = useRef(true)
   const visualSegsRef    = useRef<VisualSegment[]>([])
 
-  // Init map once
+  // Init map once (after token is ready)
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
-    const m = new mapboxgl.Map({
-      container: containerRef.current,
-      style: `mapbox://styles/mapbox/${mapStyle}`,
-      center: [25.6, 45.65],
-      zoom: 13,
-      attributionControl: false,
+    let cancelled = false
+    let ro: ResizeObserver | null = null
+    initToken().then(() => {
+      if (cancelled || !containerRef.current || mapRef.current) return
+      const m = new mapboxgl.Map({
+        container: containerRef.current!,
+        style: `mapbox://styles/mapbox/${mapStyle}`,
+        center: [25.6, 45.65],
+        zoom: 13,
+        attributionControl: false,
+      })
+      m.addControl(new mapboxgl.NavigationControl(), 'bottom-right')
+      mapRef.current = m
+      ro = new ResizeObserver(() => m.resize())
+      ro.observe(containerRef.current!)
     })
-    m.addControl(new mapboxgl.NavigationControl(), 'bottom-right')
-    mapRef.current = m
-    const ro = new ResizeObserver(() => m.resize())
-    ro.observe(containerRef.current)
-    return () => { ro.disconnect(); m.remove(); mapRef.current = null }
+    return () => { cancelled = true; ro?.disconnect(); if (mapRef.current) { mapRef.current.remove(); mapRef.current = null } }
   }, [])
 
   // Helper: clear all route layers/sources and markers
