@@ -21,12 +21,11 @@ function Calendar({ month, setMonth, footage, selected, onSelect }: {
   footage: Set<string>; selected: string | null; onSelect: (d: string | null) => void
 }) {
   const y = month.getFullYear(), m = month.getMonth()
-  const startDow = (new Date(y, m, 1).getDay() + 6) % 7 // Monday-first
+  const startDow = (new Date(y, m, 1).getDay() + 6) % 7
   const numDays = new Date(y, m + 1, 0).getDate()
   const cells: (Date | null)[] = []
   for (let i = 0; i < startDow; i++) cells.push(null)
   for (let d = 1; d <= numDays; d++) cells.push(new Date(y, m, d))
-
   const key = (d: Date) => d.toISOString().slice(0, 10)
 
   return (
@@ -55,11 +54,13 @@ function Calendar({ month, setMonth, footage, selected, onSelect }: {
   )
 }
 
-// ── Mini route thumbnail (fetches real GPS track lazily) ──────────────────────
+// ── Mini route thumbnail ──────────────────────────────────────────────────────
 const minitrackCache = new Map<string, [number, number][]>()
 
 function MiniRoute({ clipId }: { clipId: string }) {
-  const [pts, setPts] = useState<[number, number][] | null>(null)
+  const [pts, setPts] = useState<[number, number][] | null>(
+    minitrackCache.has(clipId) ? minitrackCache.get(clipId)! : null
+  )
 
   useEffect(() => {
     if (minitrackCache.has(clipId)) { setPts(minitrackCache.get(clipId)!); return }
@@ -95,31 +96,37 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
   const { loadLibraryClip, loadSession, buildMultiSession } = useStore()
   const [tab, setTab] = useState<'library' | 'upload'>(initialTab)
 
-  // ── Data fetching ──
+  // ── Pagination state ──
+  const DAYS_PAGE = 30
+  const CLIPS_PAGE = 50
   const [days, setDays] = useState<DayEntry[]>([])
   const [daysLoading, setDaysLoading] = useState(true)
+  const [daysHasMore, setDaysHasMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadingId, setLoadingId] = useState<string | null>(null)
+  const daysOffsetRef = useRef(0)
 
+  // Per-day clips (lazy loaded on expand)
   const [dayClips, setDayClips] = useState<Record<string, LibraryClip[]>>({})
   const [dayLoading, setDayLoading] = useState<Record<string, boolean>>({})
+  const [dayHasMore, setDayHasMore] = useState<Record<string, boolean>>({})
   const dayLoadingRef = useRef(new Set<string>())
+  const dayOffsetRef = useRef<Record<string, number>>({})
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set())
 
-  // Recording dates for calendar dots
+  // Calendar dots (all dates, fetched once)
   const [recordingDates, setRecordingDates] = useState<Set<string>>(new Set())
   useEffect(() => {
-    fetchDays(0, 10000).then(data => {
-      setRecordingDates(new Set(data.map(d => d.date)))
-    }).catch(() => {})
+    fetchDays(0, 10000).then(data => setRecordingDates(new Set(data.map(d => d.date)))).catch(() => {})
   }, [])
 
-  // Sidebar state
+  // Sidebar filters
   const [calMonth, setCalMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1))
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [preset, setPreset] = useState<string>('all')
   const [channelFilter, setChannelFilter] = useState<ChannelFilter>('all')
+  const listRef = useRef<HTMLDivElement>(null)
 
-  // Compute date range from preset/selection
   const dateRange = useMemo<{ from?: string; to?: string }>(() => {
     if (selectedDate) return { from: selectedDate, to: selectedDate }
     const now = new Date()
@@ -127,37 +134,71 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
     if (preset === 'today') return { from: fmt(now), to: fmt(now) }
     if (preset === '7') { const f = new Date(now); f.setDate(f.getDate() - 7); return { from: fmt(f), to: fmt(now) } }
     if (preset === '30') { const f = new Date(now); f.setDate(f.getDate() - 30); return { from: fmt(f), to: fmt(now) } }
-    return {} // 'all'
+    return {}
   }, [selectedDate, preset])
 
-  // Fetch days
-  useEffect(() => {
-    setDaysLoading(true); setError(null); setDays([]); setDayClips({})
-    fetchDays(0, 500, dateRange.from, dateRange.to)
-      .then(data => setDays(data))
-      .catch(e => setError(e.message))
-      .finally(() => setDaysLoading(false))
-  }, [dateRange.from, dateRange.to])
+  // ── Fetch days (paginated) ──
+  const fetchDaysPage = useCallback(async (reset: boolean) => {
+    const offset = reset ? 0 : daysOffsetRef.current
+    if (!reset && !daysHasMore) return
+    setDaysLoading(true)
+    try {
+      const data = await fetchDays(offset, DAYS_PAGE, dateRange.from, dateRange.to)
+      if (reset) {
+        setDays(data)
+        setDayClips({}); setDayHasMore({}); setExpandedDays(new Set())
+        dayOffsetRef.current = {}
+      } else {
+        setDays(prev => [...prev, ...data])
+      }
+      setDaysHasMore(data.length === DAYS_PAGE)
+      daysOffsetRef.current = offset + DAYS_PAGE
+      setError(null)
 
-  // Fetch clips for a day
-  const fetchClipsForDay = useCallback(async (date: string) => {
+      // Auto-expand first 3 days on initial load
+      if (reset && data.length > 0) {
+        const toExpand = data.slice(0, 3).map(d => d.date)
+        setExpandedDays(new Set(toExpand))
+        toExpand.forEach(date => fetchClipsPage(date, true))
+      }
+    } catch (e: any) { setError(e.message) }
+    finally { setDaysLoading(false) }
+  }, [dateRange.from, dateRange.to, daysHasMore])
+
+  useEffect(() => { fetchDaysPage(true) }, [dateRange.from, dateRange.to])
+
+  // ── Fetch clips for a day (paginated) ──
+  const fetchClipsPage = useCallback(async (date: string, reset = false) => {
     if (dayLoadingRef.current.has(date)) return
     dayLoadingRef.current.add(date)
     setDayLoading(prev => ({ ...prev, [date]: true }))
+    const offset = reset ? 0 : (dayOffsetRef.current[date] ?? 0)
     try {
-      const data = await fetchLibrary(0, 200, date, date)
-      setDayClips(prev => ({ ...prev, [date]: data }))
+      const data = await fetchLibrary(offset, CLIPS_PAGE, date, date)
+      setDayClips(prev => ({ ...prev, [date]: reset ? data : [...(prev[date] ?? []), ...data] }))
+      setDayHasMore(prev => ({ ...prev, [date]: data.length === CLIPS_PAGE }))
+      dayOffsetRef.current[date] = offset + data.length
     } catch (e: any) { setError(e.message) }
     finally { dayLoadingRef.current.delete(date); setDayLoading(prev => { const n = { ...prev }; delete n[date]; return n }) }
   }, [])
 
-  // Auto-expand first 3 days
-  useEffect(() => {
-    if (days.length === 0) return
-    days.slice(0, 3).forEach(d => { if (!dayClips[d.date]) fetchClipsForDay(d.date) })
-  }, [days])
+  const toggleDay = (date: string) => {
+    setExpandedDays(prev => {
+      const n = new Set(prev)
+      if (n.has(date)) { n.delete(date) } else { n.add(date); if (!dayClips[date]) fetchClipsPage(date, true) }
+      return n
+    })
+  }
 
-  // Per-day display items (deduplicated, paired)
+  // ── Infinite scroll ──
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+      if (daysHasMore && !daysLoading) fetchDaysPage(false)
+    }
+  }, [daysHasMore, daysLoading, fetchDaysPage])
+
+  // ── Display items (deduplicated, paired, filtered) ──
   const dayDisplayItems = useMemo<Record<string, DisplayItem[]>>(() => {
     const result: Record<string, DisplayItem[]> = {}
     for (const day of days) {
@@ -180,13 +221,31 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
   }, [days, dayClips, channelFilter])
 
   const itemKey = (item: DisplayItem) => item.primary.session_id ?? item.primary.id
-
   const allDisplayItems = useMemo(() => days.flatMap(d => dayDisplayItems[d.date] ?? []), [days, dayDisplayItems])
   const checkedItems = useMemo(() => allDisplayItems.filter(item => checked.has(itemKey(item))), [checked, allDisplayItems])
 
   const toggleCheck = (item: DisplayItem) => {
     const key = itemKey(item)
     setChecked(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
+  }
+
+  // ── Select day / select all ──
+  const selectDay = (date: string) => {
+    const items = dayDisplayItems[date] ?? []
+    const keys = items.map(itemKey)
+    const allChecked = keys.every(k => checked.has(k))
+    setChecked(prev => {
+      const n = new Set(prev)
+      if (allChecked) keys.forEach(k => n.delete(k))
+      else keys.forEach(k => n.add(k))
+      return n
+    })
+  }
+
+  const selectAll = () => {
+    const allKeys = allDisplayItems.map(itemKey)
+    const allChecked = allKeys.every(k => checked.has(k))
+    setChecked(allChecked ? new Set() : new Set(allKeys))
   }
 
   // ── Load handlers ──
@@ -265,6 +324,11 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
             <button className={tab === 'upload' ? 'on' : ''} onClick={() => setTab('upload')}>Add video</button>
           </div>
           <div className="lib-spacer" />
+          {tab === 'library' && allDisplayItems.length > 0 && (
+            <button className="chipbtn" onClick={selectAll} style={{ fontSize: 11, padding: '4px 10px' }}>
+              {allDisplayItems.every(item => checked.has(itemKey(item))) ? 'Deselect all' : 'Select all'}
+            </button>
+          )}
           <button className="iconbtn" onClick={onClose} title="Close"><Icon name="x" size={15} /></button>
         </div>
 
@@ -289,8 +353,8 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
               </div>
             </aside>
 
-            <div className="lib-results">
-              {daysLoading && <div className="lib-empty">Loading library…</div>}
+            <div className="lib-results" ref={listRef} onScroll={handleScroll}>
+              {daysLoading && days.length === 0 && <div className="lib-empty">Loading library…</div>}
               {error && !daysLoading && (
                 <div style={{ padding: 20, color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.9 }}>
                   ✗ {error}<br />
@@ -303,62 +367,82 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
 
               {days.map(day => {
                 const items = dayDisplayItems[day.date] ?? []
+                const isExpanded = expandedDays.has(day.date)
                 const isLoading = !!dayLoading[day.date]
-                const hasClips = !!dayClips[day.date]
-
-                // Auto-fetch on first render if not loaded
-                if (!hasClips && !isLoading && !dayLoadingRef.current.has(day.date)) {
-                  // defer to avoid setState-in-render
-                  setTimeout(() => fetchClipsForDay(day.date), 0)
-                }
+                const hasMore = !!dayHasMore[day.date]
+                const dayKeys = items.map(itemKey)
+                const dayCheckedCount = dayKeys.filter(k => checked.has(k)).length
+                const dayAllChecked = dayKeys.length > 0 && dayCheckedCount === dayKeys.length
 
                 return (
                   <div className="lib-day" key={day.date}>
-                    <div className="lib-day-head">
-                      <span>{formatDate(day.date)}</span>
-                      <span className="lib-day-count mono">
-                        {isLoading ? '…' : `${items.length} session${items.length !== 1 ? 's' : ''}`}
+                    <div className="lib-day-head" style={{ cursor: 'pointer', alignItems: 'center' }} onClick={() => toggleDay(day.date)}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Icon name={isExpanded ? 'chevron-left' : 'chevron-right'} size={13}
+                          style={{ transform: isExpanded ? 'rotate(-90deg)' : 'none', transition: '.15s', color: 'var(--txt3)' }} />
+                        {formatDate(day.date)}
+                      </span>
+                      <span className="lib-day-count mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {day.count} clip{day.count !== 1 ? 's' : ''}
+                        {isExpanded && items.length > 0 && (
+                          <button className="chipbtn" onClick={e => { e.stopPropagation(); selectDay(day.date) }}
+                            style={{ fontSize: 9, padding: '2px 7px' }}>
+                            {dayAllChecked ? 'Deselect' : 'Select day'}
+                          </button>
+                        )}
                       </span>
                     </div>
-                    <div className="lib-cards">
-                      {isLoading && items.length === 0 && (
-                        <div style={{ padding: 14, color: 'var(--txt3)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>Loading…</div>
-                      )}
-                      {items.map(item => {
-                        const key = itemKey(item)
-                        const isChecked = checked.has(key)
 
-                        return (
-                          <div key={key} className={`clipcard ${isChecked ? 'checked' : ''}`} onClick={() => loadBoth(item)}>
-                            <label className="clip-check" onClick={e => e.stopPropagation()}>
-                              <input type="checkbox" checked={isChecked} onChange={() => toggleCheck(item)} />
-                            </label>
-                            <div className="clip-thumb">
-                              <MiniRoute clipId={item.primary.id} />
+                    {isExpanded && (
+                      <div className="lib-cards">
+                        {isLoading && items.length === 0 && (
+                          <div style={{ padding: 14, color: 'var(--txt3)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>Loading…</div>
+                        )}
+                        {items.map(item => {
+                          const key = itemKey(item)
+                          const isChecked = checked.has(key)
+                          return (
+                            <div key={key} className={`clipcard ${isChecked ? 'checked' : ''}`} onClick={() => loadBoth(item)}>
+                              <label className="clip-check" onClick={e => e.stopPropagation()}>
+                                <input type="checkbox" checked={isChecked} onChange={() => toggleCheck(item)} />
+                              </label>
+                              <div className="clip-thumb">
+                                <MiniRoute clipId={item.primary.id} />
+                              </div>
+                              <div className="clip-meta">
+                                <div className="clip-time mono">
+                                  {item.primary.recorded_at
+                                    ? new Date(item.primary.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+                                    : '—'}
+                                </div>
+                                <div className="clip-badges">
+                                  <span className="badge badge--f">FRONT</span>
+                                  {item.peer && <span className="badge badge--r">REAR</span>}
+                                </div>
+                                <div className="clip-stats mono">
+                                  {item.primary.max_speed_kmh != null && `${Math.round(item.primary.max_speed_kmh)} km/h`}
+                                  {item.primary.duration_sec != null && ` · ${fmtDur(item.primary.duration_sec)}`}
+                                </div>
+                              </div>
+                              <div className="clip-load">Load <Icon name="chevron-right" size={13} /></div>
                             </div>
-                            <div className="clip-meta">
-                              <div className="clip-time mono">
-                                {item.primary.recorded_at
-                                  ? new Date(item.primary.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-                                  : '—'}
-                              </div>
-                              <div className="clip-badges">
-                                <span className="badge badge--f">FRONT</span>
-                                {item.peer && <span className="badge badge--r">REAR</span>}
-                              </div>
-                              <div className="clip-stats mono">
-                                {item.primary.max_speed_kmh != null && `${Math.round(item.primary.max_speed_kmh)} km/h`}
-                                {item.primary.duration_sec != null && ` · ${fmtDur(item.primary.duration_sec)}`}
-                              </div>
-                            </div>
-                            <div className="clip-load">Load <Icon name="chevron-right" size={13} /></div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                          )
+                        })}
+                        {hasMore && (
+                          <button className="chipbtn" onClick={e => { e.stopPropagation(); fetchClipsPage(day.date) }}
+                            disabled={isLoading} style={{ margin: '4px 0', textAlign: 'center' }}>
+                            {isLoading ? 'Loading…' : 'Load more clips'}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )
               })}
+
+              {daysLoading && days.length > 0 && (
+                <div style={{ padding: 14, textAlign: 'center', color: 'var(--txt3)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>Loading more days…</div>
+              )}
             </div>
           </div>
         ) : (

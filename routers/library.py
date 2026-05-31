@@ -245,8 +245,13 @@ async def get_session_clips(session_id: str):
 
 @router.get("/api/library/{clip_id}/minitrack")
 async def get_minitrack(clip_id: str, points: int = 20):
-    """Return a decimated lat/lon track for thumbnail rendering."""
+    """Return a decimated lat/lon track for thumbnail rendering.
+
+    Response is immutable (GPS data never changes) so we cache aggressively.
+    """
     import re as _re
+
+    from fastapi.responses import JSONResponse
 
     with Session(get_engine()) as sess:
         clip = sess.get(Clip, clip_id)
@@ -266,15 +271,15 @@ async def get_minitrack(clip_id: str, points: int = 20):
     ]
 
     if not all_pts:
-        return []
+        return JSONResponse([], headers={"Cache-Control": "public, max-age=86400, immutable"})
     if len(all_pts) <= points:
-        return all_pts
+        return JSONResponse(all_pts, headers={"Cache-Control": "public, max-age=86400, immutable"})
 
     # Uniform decimation, always include first and last
     step = (len(all_pts) - 1) / (points - 1)
     result = [all_pts[round(i * step)] for i in range(points)]
     result[-1] = all_pts[-1]
-    return result
+    return JSONResponse(result, headers={"Cache-Control": "public, max-age=86400, immutable"})
 
 
 @router.get("/api/library/{clip_id}", response_model=ClipDetailResponse)
