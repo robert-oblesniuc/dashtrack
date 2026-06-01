@@ -238,7 +238,7 @@ export default function MultiVideoPlayer() {
             overflow: 'hidden', boxShadow: '0 2px 12px rgba(0,0,0,.7)', flex: 'none',
           }
     }
-    return isSideBySide ? { flex: '1 1 0', minHeight: 0 } : {}
+    return { flex: '1 1 0', minHeight: 0, minWidth: 0 }
   }
 
   const cycleLayout = () => {

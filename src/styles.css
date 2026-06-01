@@ -91,7 +91,7 @@ button{font-family:inherit;color:inherit;border:none;background:none;cursor:poin
 /* video tile */
 .vtilewrap{padding:0;overflow:hidden}
 .vtile{position:relative;width:100%;aspect-ratio:16/10;background:#05070b;overflow:hidden}
-.vtile-ctl{position:absolute;top:8px;right:8px;display:flex;gap:5px;align-items:center;z-index:5}
+.vtile-ctl{position:absolute;bottom:8px;left:8px;display:flex;gap:5px;align-items:center;z-index:6}
 .vbtn{width:26px;height:26px;border-radius:7px;background:rgba(10,12,16,.62);border:1px solid rgba(255,255,255,.16);
   color:#fff;font-size:13px;display:grid;place-items:center;backdrop-filter:blur(6px);transition:.13s}
 .vbtn:hover{background:rgba(var(--accent-rgb),.4)}

@@ -118,7 +118,7 @@ export default function App() {
       mapEl.parentElement?.removeChild(mapEl)
       videoEl.parentElement?.removeChild(videoEl)
     }
-  }, [stage, dockOpen, focusVid, focusMap])
+  }, [stage, dockOpen, focusVid, focusMap, welcomeMode])
 
   // Keyboard shortcuts
   useEffect(() => {
