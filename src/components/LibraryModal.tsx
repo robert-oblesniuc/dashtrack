@@ -26,7 +26,7 @@ function Calendar({ month, setMonth, footage, selected, onSelect }: {
   const cells: (Date | null)[] = []
   for (let i = 0; i < startDow; i++) cells.push(null)
   for (let d = 1; d <= numDays; d++) cells.push(new Date(y, m, d))
-  const key = (d: Date) => d.toISOString().slice(0, 10)
+  const key = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
   return (
     <div className="cal">
@@ -130,7 +130,7 @@ export default function LibraryModal({ onClose, initialTab = 'library', checked,
   const dateRange = useMemo<{ from?: string; to?: string }>(() => {
     if (selectedDate) return { from: selectedDate, to: selectedDate }
     const now = new Date()
-    const fmt = (d: Date) => d.toISOString().slice(0, 10)
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     if (preset === 'today') return { from: fmt(now), to: fmt(now) }
     if (preset === '7') { const f = new Date(now); f.setDate(f.getDate() - 7); return { from: fmt(f), to: fmt(now) } }
     if (preset === '30') { const f = new Date(now); f.setDate(f.getDate() - 30); return { from: fmt(f), to: fmt(now) } }

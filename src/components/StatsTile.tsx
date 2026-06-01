@@ -3,7 +3,7 @@ import { useStore } from '../store'
 import { totalDistance, fmtDuration } from '../hooks/useGPX'
 
 export default function StatsTile() {
-  const { points, currentIdx } = useStore()
+  const { points, currentIdx, multiSession, videoDuration } = useStore()
 
   const stats = useMemo(() => {
     if (!points.length) return null
@@ -11,11 +11,16 @@ export default function StatsTile() {
     const speeds = points.map(p => p.speed).filter(s => s > 0)
     const maxSpd = speeds.length ? Math.round(Math.max(...speeds)) : 0
     const avgSpd = speeds.length ? Math.round(speeds.reduce((a, b) => a + b, 0) / speeds.length) : 0
-    const dur = points[0].time && points[points.length - 1].time
-      ? (points[points.length - 1].time!.getTime() - points[0].time!.getTime()) / 1000
-      : 0
+    const first = points[0], last = points[points.length - 1]
+    // Mirror the player bar's timeline (store.videoDuration) so the two
+    // always agree. GPX from the extractor has no <time>, only <video_sec>,
+    // so fall back to the GPS span only when no video duration is known.
+    const dur = multiSession ? multiSession.totalDuration
+      : videoDuration > 0 ? videoDuration
+      : first.time && last.time ? (last.time.getTime() - first.time.getTime()) / 1000
+      : last.videoSec - first.videoSec
     return { dist, maxSpd, avgSpd, dur, pts: points.length, fixRate: Math.round((speeds.length / points.length) * 100) }
-  }, [points])
+  }, [points, multiSession, videoDuration])
 
   if (!stats) return null
 
