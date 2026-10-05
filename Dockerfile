@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Backend source
 COPY main.py extractor.py db.py scanner.py ./
 COPY routers/ ./routers/
+COPY providers/ ./providers/
 
 # Built frontend (FastAPI will serve this as static files)
 COPY --from=frontend-builder /app/frontend/dist ./static
